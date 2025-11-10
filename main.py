@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -67,24 +67,39 @@ class CreatePayload(BaseModel):
     data: Dict[str, Any]
 
 
+def _log_compliance(action: str, resource_type: str, resource_id: Optional[str], labels: List[str], actor_id: Optional[str] = None, context: Optional[Dict[str, Any]] = None):
+    try:
+        create_document(
+            "compliance",
+            {
+                "action": action,
+                "actor_id": actor_id,
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+                "context": context or {},
+                "labels": labels,
+                "severity": "info",
+                "timestamp": datetime.utcnow(),
+            },
+        )
+    except Exception:
+        # Best-effort logging; do not block the main operation
+        pass
+
+
 @app.post("/api/create")
 def api_create(payload: CreatePayload):
     collection = payload.collection.lower()
     try:
         inserted_id = create_document(collection, payload.data)
         # Write compliance log
-        create_document(
-            "compliance",
-            {
-                "action": "create_document",
-                "actor_id": payload.data.get("author_id") or payload.data.get("assignee_id"),
-                "resource_type": collection,
-                "resource_id": inserted_id,
-                "context": {"fields": list(payload.data.keys())},
-                "labels": ["auto-log", "create"],
-                "severity": "info",
-                "timestamp": datetime.utcnow(),
-            },
+        _log_compliance(
+            action="create_document",
+            resource_type=collection,
+            resource_id=inserted_id,
+            labels=["auto-log", "create"],
+            actor_id=payload.data.get("author_id") or payload.data.get("assignee_id"),
+            context={"fields": list(payload.data.keys())},
         )
         return {"id": inserted_id}
     except Exception as e:
@@ -132,18 +147,13 @@ def ai_portfolio_analysis(req: PortfolioAnalysisRequest):
         },
     )
 
-    create_document(
-        "compliance",
-        {
-            "action": "generate_recommendation",
-            "actor_id": None,
-            "resource_type": "recommendation",
-            "resource_id": recommendation_id,
-            "context": {"category": "investment"},
-            "labels": ["ai", "portfolio"],
-            "severity": "info",
-            "timestamp": datetime.utcnow(),
-        },
+    _log_compliance(
+        action="generate_recommendation",
+        actor_id=None,
+        resource_type="recommendation",
+        resource_id=recommendation_id,
+        context={"category": "investment"},
+        labels=["ai", "portfolio"],
     )
 
     return {
@@ -177,18 +187,13 @@ def ai_tax_optimization(req: TaxOptimizationRequest):
         },
     )
 
-    create_document(
-        "compliance",
-        {
-            "action": "generate_recommendation",
-            "actor_id": None,
-            "resource_type": "recommendation",
-            "resource_id": reco_id,
-            "context": {"category": "tax", "year": year},
-            "labels": ["ai", "tax"],
-            "severity": "info",
-            "timestamp": datetime.utcnow(),
-        },
+    _log_compliance(
+        action="generate_recommendation",
+        actor_id=None,
+        resource_type="recommendation",
+        resource_id=reco_id,
+        context={"category": "tax", "year": year},
+        labels=["ai", "tax"],
     )
 
     return {"recommendation_id": reco_id, "strategy": strategy}
@@ -215,21 +220,112 @@ def ai_estate_plan(req: EstatePlanningRequest):
         },
     )
 
-    create_document(
-        "compliance",
-        {
-            "action": "generate_recommendation",
-            "actor_id": None,
-            "resource_type": "recommendation",
-            "resource_id": reco_id,
-            "context": {"category": "estate"},
-            "labels": ["ai", "estate"],
-            "severity": "info",
-            "timestamp": datetime.utcnow(),
-        },
+    _log_compliance(
+        action="generate_recommendation",
+        actor_id=None,
+        resource_type="recommendation",
+        resource_id=reco_id,
+        context={"category": "estate"},
+        labels=["ai", "estate"],
     )
 
     return {"recommendation_id": reco_id, "plan": plan}
+
+
+# ----------------------------
+# Demo seed endpoint
+# ----------------------------
+
+class SeedRequest(BaseModel):
+    count_clients: int = 20
+
+
+def _random_pick(seq: List[Any], idx: int) -> Any:
+    if not seq:
+        return None
+    return seq[idx % len(seq)]
+
+
+@app.post("/api/seed/demo")
+def seed_demo(req: SeedRequest):
+    try:
+        existing = get_documents("client", {}, 1)
+        if existing:
+            # Prevent duplicating demo data if clients already exist
+            return {"status": "ok", "message": "Clients already exist; skipping seed.", "created": 0}
+
+        # Create households
+        household_names = [
+            "Johnson Household",
+            "Patel Family",
+            "Nguyen Household",
+            "Garcia Family",
+            "O'Connor Household",
+        ]
+        household_ids: List[str] = []
+        risk_profiles = ["Conservative", "Moderate", "Aggressive"]
+        for i, name in enumerate(household_names):
+            hid = create_document(
+                "household",
+                {"name": name, "risk_profile": _random_pick(risk_profiles, i)},
+            )
+            household_ids.append(hid)
+            _log_compliance("create_document", "household", hid, ["auto-log", "seed"], context={"seed": True})
+
+        # Client names and distribution of AUM
+        first_names = [
+            "Alex", "Jordan", "Taylor", "Morgan", "Casey", "Riley", "Avery", "Quinn", "Peyton", "Dakota",
+            "Jamie", "Cameron", "Robin", "Skyler", "Kendall", "Emerson", "Rowan", "Hayden", "Sage", "Reese",
+        ]
+        last_names = [
+            "Smith", "Lee", "Brown", "Wilson", "Martinez", "Clark", "Lopez", "Davis", "Lewis", "Walker",
+        ]
+        account_types = ["taxable", "ira", "roth_ira", "401k", "529", "trust"]
+        custodians = ["Fidelity", "Schwab", "Vanguard", "Pershing", "TD Ameritrade"]
+
+        created_clients = 0
+        for i in range(req.count_clients):
+            fn = first_names[i % len(first_names)]
+            ln = last_names[i % len(last_names)]
+            email = f"{fn.lower()}.{ln.lower()}@example.com"
+            hid = _random_pick(household_ids, i)
+
+            client_id = create_document(
+                "client",
+                {"first_name": fn, "last_name": ln, "email": email, "household_id": hid, "kyc_status": "approved"},
+            )
+            created_clients += 1
+            _log_compliance("create_document", "client", client_id, ["auto-log", "seed"], context={"seed": True})
+
+            # Assign 1-3 accounts per client with varying balances (AUM)
+            num_accounts = (i % 3) + 1
+            for j in range(num_accounts):
+                balance = float(25000 * ((i + 1) ** 1.1)) * (0.6 + 0.4 * (j / max(1, num_accounts - 1)))
+                acc_type = account_types[(i + j) % len(account_types)]
+                custodian = custodians[(i + j) % len(custodians)]
+                masked = f"****{(1000 + (i * 7 + j) % 9000)}"
+
+                account_id = create_document(
+                    "account",
+                    {
+                        "client_id": client_id,
+                        "household_id": hid,
+                        "account_type": acc_type,
+                        "custodian": custodian,
+                        "account_number_masked": masked,
+                        "balance": round(balance, 2),
+                        "holdings": [
+                            {"ticker": "VTI", "weight": 0.5},
+                            {"ticker": "BND", "weight": 0.4},
+                            {"ticker": "CASH", "weight": 0.1},
+                        ],
+                    },
+                )
+                _log_compliance("create_document", "account", account_id, ["auto-log", "seed"], context={"seed": True})
+
+        return {"status": "ok", "message": "Demo data created", "created": created_clients}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # Health + DB connectivity check
